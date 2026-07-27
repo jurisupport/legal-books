@@ -29,6 +29,25 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   content='chunks', content_rowid='rowid', tokenize='unicode61',
   prefix='2 3 4'
 );
+
+-- External-content FTS5 tables are not maintained automatically. Without
+-- these triggers any write that does not end in an explicit 'rebuild'
+-- (an interrupted reindex, a manual DELETE) leaves the index pointing at
+-- rows that no longer exist, and searches surface phantom chunk_ids.
+CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+  INSERT INTO chunks_fts(rowid, chunk_text, chunk_id, book_id, page)
+  VALUES (new.rowid, new.chunk_text, new.chunk_id, new.book_id, new.page);
+END;
+CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+  INSERT INTO chunks_fts(chunks_fts, rowid, chunk_text, chunk_id, book_id, page)
+  VALUES ('delete', old.rowid, old.chunk_text, old.chunk_id, old.book_id, old.page);
+END;
+CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+  INSERT INTO chunks_fts(chunks_fts, rowid, chunk_text, chunk_id, book_id, page)
+  VALUES ('delete', old.rowid, old.chunk_text, old.chunk_id, old.book_id, old.page);
+  INSERT INTO chunks_fts(rowid, chunk_text, chunk_id, book_id, page)
+  VALUES (new.rowid, new.chunk_text, new.chunk_id, new.book_id, new.page);
+END;
 """
 
 

@@ -238,7 +238,8 @@ SECRETS="$HOME/.jurisupport/secrets.env"
 run_or_plan mkdir -p "$(dirname "$SECRETS")"
 run_or_plan chmod 700 "$(dirname "$SECRETS")"
 
-if [[ -f "$SECRETS" ]] && grep -q "GEMINI_API_KEY" "$SECRETS"; then
+# 값이 빈 'GEMINI_API_KEY=' 한 줄만 있어도 '등록됨'으로 보고 건너뛰던 문제 수정.
+if [[ -f "$SECRETS" ]] && grep -qE '^[[:space:]]*GEMINI_API_KEY=[^[:space:]]' "$SECRETS"; then
   info_or_plan "Gemini API 키 이미 등록됨: $SECRETS"
 else
   if is_dry_run; then
@@ -264,8 +265,11 @@ else
       echo "  ------------------------------------------------------------"
       read -r -p "키를 복사했으면 엔터: " _
     fi
-    read -r -p "Gemini API 키 입력 (건너뛰려면 Enter): " GEMINI_KEY
+    # -s: 입력을 화면에 찍지 않는다. 없으면 키가 스크롤백·터미널 로그·화면공유에 남는다.
+    read -rs -p "Gemini API 키 입력 (건너뛰려면 Enter): " GEMINI_KEY
+    echo ""
     if [[ -n "${GEMINI_KEY:-}" ]]; then
+      umask 077
       echo "GEMINI_API_KEY=${GEMINI_KEY}" >> "$SECRETS"
       chmod 600 "$SECRETS"
       info "저장 완료: $SECRETS (chmod 600)"
