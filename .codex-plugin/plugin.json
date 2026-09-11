@@ -1,0 +1,20 @@
+{
+  "name": "legal-books",
+  "version": "1.0.0",
+  "description": "사무소 보유 법률서적을 로컬 하이브리드 검색으로 찾아 저자·서명·판·페이지와 함께 인용하는 스킬.",
+  "author": {
+    "name": "쥬리서포트 주식회사"
+  },
+  "repository": "https://github.com/jurisupport/legal-books",
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "법률서적 검색",
+    "shortDescription": "사무소 보유 교과서 검색과 출처 인용",
+    "longDescription": "로컬 검색 서버와 SQLite FTS5·Gemini 임베딩을 이용해 보유 법률서적을 검색합니다. 검색 서버 설치와 책 추가가 필요하며, 책 본문 청크와 검색어는 Gemini API로 전송됩니다.",
+    "developerName": "쥬리서포트 주식회사",
+    "category": "Productivity",
+    "capabilities": ["Read"],
+    "defaultPrompt": ["소멸시효 쟁점을 사무소 교과서에서 찾아 출처와 함께 정리해줘."]
+  }
+}

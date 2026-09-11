@@ -17,12 +17,18 @@ TOOLKIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$TOOLKIT_DIR/.." && pwd)"
 source "$TOOLKIT_DIR/lib/dry-run.sh" "$@"
 
-# --with-skill: ~/.claude/skills에 스킬 직접 복사 (플러그인 없이 쓰는 경우).
-# Claude Code 플러그인으로 설치하면 스킬이 플러그인에 포함되므로 불필요.
+# 플러그인 없이 쓸 때 같은 스킬을 Claude Code/Codex 사용자 경로에 복사.
 WITH_SKILL=0
+WITH_CODEX_SKILL=0
 for _arg in "$@"; do
   case "$_arg" in
     --with-skill) WITH_SKILL=1 ;;
+    --with-codex-skill) WITH_CODEX_SKILL=1 ;;
+    --plan|--dry-run) ;;
+    *)
+      printf '알 수 없는 옵션: %s\n사용법: %s [--with-skill] [--with-codex-skill] [--dry-run|--plan]\n' "$_arg" "$0" >&2
+      exit 2
+      ;;
   esac
 done
 
@@ -294,15 +300,22 @@ fi
 run_shell_or_plan "chmod +x '$ROOT/scripts/'*.sh 2>/dev/null || true"
 
 # ============================================================
-# Install Claude Code skill
+# Install optional Claude Code / Codex skills
 # ============================================================
 if [[ "$WITH_SKILL" == "1" ]]; then
   info_or_plan "클로드코드 스킬 설치 중 (--with-skill)"
   SKILL_DST="$HOME/.claude/skills/legal-books"
   run_or_plan mkdir -p "$SKILL_DST"
   run_or_plan cp "$REPO_DIR/skills/legal-books/SKILL.md" "$SKILL_DST/SKILL.md"
-else
-  info_or_plan "스킬 복사 생략 — Claude Code 플러그인으로 설치 시 스킬 자동 포함 (직접 설치는 --with-skill)"
+fi
+if [[ "$WITH_CODEX_SKILL" == "1" ]]; then
+  info_or_plan "Codex 스킬 설치 중 (--with-codex-skill)"
+  SKILL_DST="$HOME/.agents/skills/legal-books"
+  run_or_plan mkdir -p "$SKILL_DST"
+  run_or_plan cp "$REPO_DIR/skills/legal-books/SKILL.md" "$SKILL_DST/SKILL.md"
+fi
+if [[ "$WITH_SKILL" == "0" && "$WITH_CODEX_SKILL" == "0" ]]; then
+  info_or_plan "스킬 복사 생략 — 직접 설치: Claude Code --with-skill / Codex --with-codex-skill"
 fi
 
 # ============================================================
@@ -369,7 +382,7 @@ cat <<EOF
       -H 'Content-Type: application/json' \\
       -d '{"query":"소멸시효","top_k":3}'
 
-  Step 4. 클로드코드에서 자연어 사용
+  Step 4. 스킬이 설치된 Claude Code 또는 로컬 Codex에서 자연어 사용
     "민법 시효 쟁점에 대해 교과서 바탕으로 정리해줘"
     → 자동으로 legal-books 검색 → 저자·서명·페이지 인용 포함 답변
 

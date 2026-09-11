@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Static checks for toolkit/install.sh (jurisupport-plugins에서 이관).
+# Static and dry-run checks for toolkit/install.sh.
 
 set -euo pipefail
 
@@ -47,6 +47,49 @@ if bash "$INSTALL" --dry-run >/dev/null 2>&1; then
   printf 'ok - install.sh --dry-run completes\n'
 else
   fail "install.sh --dry-run completes"
+fi
+
+install_home="$(mktemp -d)"
+trap 'rm -rf "$install_home"' EXIT
+
+check_skill_plan() {
+  local claude="$1" codex="$2" output target expected found
+  shift 2
+  if ! output="$(HOME="$install_home" bash "$INSTALL" --dry-run "$@" 2>&1)"; then
+    fail "skill dry-run completes: $*"
+    printf '%s\n' "$output" >&2
+    return
+  fi
+  for target in .claude .agents; do
+    expected="$claude"
+    [[ "$target" != .agents ]] || expected="$codex"
+    found=0
+    if grep -qF -- "PLAN: cp $ROOT/skills/legal-books/SKILL.md $install_home/$target/skills/legal-books/SKILL.md" <<< "$output"; then
+      found=1
+    fi
+    if [[ "$found" == "$expected" ]]; then
+      printf 'ok - %s skill target for [%s]\n' "$target" "$*"
+    else
+      fail "$target skill target for [$*]"
+    fi
+  done
+}
+
+check_skill_plan 0 0
+check_skill_plan 1 0 --with-skill
+check_skill_plan 0 1 --with-codex-skill
+check_skill_plan 1 1 --with-skill --with-codex-skill --plan
+
+if HOME="$install_home" bash "$INSTALL" --dry-run --unknown >/dev/null 2>&1; then
+  fail "installer rejects unknown options"
+else
+  printf 'ok - installer rejects unknown options\n'
+fi
+
+if [[ -z "$(ls -A "$install_home")" ]]; then
+  printf 'ok - dry-run leaves HOME unchanged\n'
+else
+  fail "dry-run leaves HOME unchanged"
 fi
 
 if [[ "$failures" -gt 0 ]]; then
