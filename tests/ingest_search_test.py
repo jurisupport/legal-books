@@ -116,6 +116,20 @@ class IngestSearchTest(unittest.TestCase):
         self.assertEqual(result["results"][0]["title"], "새 책")
         self.assertIn("FTS only", " ".join(result["warnings"]))
 
+    def test_empty_library_never_calls_embedding_api(self):
+        with contextlib.closing(sqlite3.connect(self.db)) as con, con:
+            con.execute("DELETE FROM chunks")
+            con.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+        for keep_book_metadata in (True, False):
+            if not keep_book_metadata:
+                with contextlib.closing(sqlite3.connect(self.db)) as con, con:
+                    con.execute("DELETE FROM books")
+            with self.subTest(keep_book_metadata=keep_book_metadata), \
+                 patch.object(server, "embed_query", return_value=self.valid) as embed:
+                result = server.search(server.SearchReq(query="소멸시효"))
+                self.assertEqual(result, {"query": "소멸시효", "results": []})
+                embed.assert_not_called()
+
     def test_missing_embedding_response_is_rejected(self):
         with patch("google.genai.Client") as client, patch.dict(os.environ, {
                 "GEMINI_API_KEY": "synthetic-test-key", "LEGAL_BOOKS_EMBED_MAX_RETRIES": "1"}):

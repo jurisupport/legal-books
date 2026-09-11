@@ -1,6 +1,6 @@
 {
   "name": "legal-books",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "사무소 보유 법률서적을 로컬 하이브리드 검색으로 찾아 저자·서명·판·페이지와 함께 인용하는 스킬.",
   "author": {
     "name": "쥬리서포트 주식회사"
