@@ -16,6 +16,9 @@ case "$(uname -s)" in
   *)                    VENV="$ROOT/.venv/bin/activate";     PY=python3; PLATFORM=linux ;;
 esac
 
+# shellcheck disable=SC1090
+source "$VENV"
+
 # OCR 의존성 사전 점검 (책 추가 시점에 필요)
 missing=""
 command -v ocrmypdf  >/dev/null 2>&1 || missing+="ocrmypdf "
@@ -54,7 +57,7 @@ fi
 expand_user_path() {
   case "$1" in
     "~") printf '%s\n' "$HOME" ;;
-    "~/"*) printf '%s\n' "$HOME/${1#~/}" ;;
+    "~/"*) printf '%s\n' "$HOME/${1#\~/}" ;;
     *) printf '%s\n' "$1" ;;
   esac
 }
@@ -89,23 +92,15 @@ if [[ ! -f "$PDF" ]]; then
   echo "PDF not found: $PDF" >&2; exit 1
 fi
 
-# shellcheck disable=SC1090
-source "$VENV"
-
 # Sanitize for folder name
 SAFE_TITLE=$(sanitize_path_segment "$TITLE")
 SAFE_AUTHOR=$(sanitize_path_segment "$AUTHOR")
 SAFE_EDITION=$(sanitize_path_segment "$EDITION")
 
-# Reuse a previous incomplete folder for the same book (keeps finished OCR);
-# otherwise allocate book_id from both completed folders and DB rows.
-INCOMPLETE_MATCH="$(find "$ROOT/books" -maxdepth 1 -type d \
-  -name ".???_${SAFE_AUTHOR}_${SAFE_TITLE}_${SAFE_EDITION}.incomplete" 2>/dev/null | head -n 1)"
-if [[ -n "$INCOMPLETE_MATCH" ]]; then
-  BOOK_ID="$(basename "$INCOMPLETE_MATCH" | sed -E 's/^\.([0-9]{3})_.*/\1/')"
-  echo "[add_book] 이전 중단 지점 발견, 이어서 진행: $INCOMPLETE_MATCH"
-else
-BOOK_ID=$(ROOT="$ROOT" "$PY" <<'PY'
+# Reserve IDs in completed and incomplete folders, and match retries literally.
+# ponytail: sequential imports; lock allocation before supporting concurrent runs.
+BOOK_ID=$(ROOT="$ROOT" BOOK_SUFFIX="${SAFE_AUTHOR}_${SAFE_TITLE}_${SAFE_EDITION}" \
+  AUTHOR="$AUTHOR" TITLE="$TITLE" EDITION="$EDITION" "$PY" <<'PY'
 import os
 import re
 import sqlite3
@@ -113,34 +108,54 @@ from pathlib import Path
 
 root = Path(os.environ["ROOT"])
 ids = set()
+completed_ids = set()
+retries = []
 books_dir = root / "books"
 if books_dir.exists():
     for child in books_dir.iterdir():
         if child.is_dir():
-            match = re.match(r"^(\d{3})_", child.name)
+            match = re.match(r"^\.?(\d+)_", child.name)
             if match:
-                ids.add(int(match.group(1)))
+                book_id = match.group(1)
+                ids.add(int(book_id))
+                if not child.name.startswith("."):
+                    completed_ids.add(int(book_id))
+                if child.name == f".{book_id}_{os.environ['BOOK_SUFFIX']}.incomplete":
+                    retries.append(book_id)
 
+db_books = {}
 db_path = root / "db" / "books_fts.db"
 if db_path.exists():
+    con = sqlite3.connect(db_path)
     try:
-        con = sqlite3.connect(db_path)
-        try:
-            for (book_id,) in con.execute("SELECT book_id FROM books"):
-                if re.fullmatch(r"\d+", str(book_id)):
-                    ids.add(int(book_id))
-        finally:
-            con.close()
-    except sqlite3.Error:
-        pass
+        for book_id, author, title, edition in con.execute("SELECT book_id, author, title, edition FROM books"):
+            if re.fullmatch(r"\d+", str(book_id)):
+                ids.add(int(book_id))
+                db_books[int(book_id)] = (author or "", title or "", edition or "")
+    finally:
+        con.close()
 
-print(f"{max(ids, default=0) + 1:03d}")
+if len(retries) > 1:
+    raise SystemExit("[add_book] 여러 중단 폴더가 같은 책과 일치합니다. 폴더를 확인하세요.")
+if retries:
+    book_id = retries[0]
+    metadata = tuple(os.environ[key] for key in ("AUTHOR", "TITLE", "EDITION"))
+    if int(book_id) in completed_ids or (
+        int(book_id) in db_books and db_books[int(book_id)] != metadata
+    ):
+        raise SystemExit(f"[add_book] Book ID {book_id}는 다른 책에서 사용 중입니다. 중단 폴더를 확인하세요.")
+    print(book_id)
+else:
+    print(f"{max(ids, default=0) + 1:03d}")
 PY
 )
-fi
 
 FINAL_BOOK_DIR="$ROOT/books/${BOOK_ID}_${SAFE_AUTHOR}_${SAFE_TITLE}_${SAFE_EDITION}"
 BOOK_DIR="$ROOT/books/.${BOOK_ID}_${SAFE_AUTHOR}_${SAFE_TITLE}_${SAFE_EDITION}.incomplete"
+
+if [[ -d "$BOOK_DIR" ]]; then
+  echo "[add_book] 이전 중단 지점 발견, 이어서 진행: $BOOK_DIR"
+fi
 
 if [[ -e "$FINAL_BOOK_DIR" ]]; then
   echo "[add_book] target folder already exists: $FINAL_BOOK_DIR" >&2

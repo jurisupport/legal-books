@@ -1,6 +1,6 @@
 # 법률서적 검색 시스템 — 스캔·OCR·임베딩·검색 (legal-books)
 
-> 본인 사무소 보유 법률서적(교과서)을 클로드코드가 검색하여 출처와 함께 답변하도록 만드는 방법.
+> 본인 사무소 보유 법률서적(교과서)을 Claude Code 또는 로컬 Codex가 검색하여 출처와 함께 답변하도록 만드는 방법.
 
 ---
 
@@ -102,6 +102,8 @@ chmod 600 ~/.jurisupport/secrets.env
 git clone https://github.com/jurisupport/legal-books ~/legal-books-src
 bash ~/legal-books-src/toolkit/install.sh
 # Claude Code 플러그인 없이 쓰려면: bash ~/legal-books-src/toolkit/install.sh --with-skill
+# 로컬 Codex에서 쓰려면: bash ~/legal-books-src/toolkit/install.sh --with-codex-skill
+# 두 스킬을 함께 설치하려면 두 옵션을 함께 지정. 계획만 확인하려면 --dry-run 추가.
 ```
 
 이 스크립트가:
@@ -109,7 +111,8 @@ bash ~/legal-books-src/toolkit/install.sh
 - Python venv + 의존성 설치
 - 빈 SQLite DB 초기화
 - Gemini API 키 등록 (입력 요구)
-- 검색 서버 자동 실행 등록 (launchd / systemd)
+- 선택한 스킬을 사용자 경로에 복사 (Claude Code: `~/.claude/skills`, Codex: `~/.agents/skills`)
+- 검색 서버를 백그라운드로 시작 (부팅 시 자동 실행 등록은 하지 않음)
 
 ### Step 4. 검색 서버 작동 확인
 
@@ -149,7 +152,7 @@ curl -s http://localhost:8766/health
 
 ```bash
 ~/legal-books/scripts/add_book.sh \
-  --pdf "~/scan/곽윤직_민법총칙_제9판.pdf" \
+  --pdf "$HOME/scan/곽윤직_민법총칙_제9판.pdf" \
   --author "곽윤직" \
   --title "민법총칙" \
   --edition "제9판" \
@@ -179,14 +182,20 @@ curl -s -X POST http://localhost:8766/search \
 
 → 책 ID + 페이지 + 발췌 + 유사도 점수
 
-### Step 4. 클로드코드 스킬 활성화
+### Step 4. Claude Code·Codex 스킬 확인
 
 ```bash
-# 본 패키지 install.sh가 이미 등록함. 확인:
+# --with-skill로 직접 설치한 Claude Code 스킬:
 ls ~/.claude/skills/legal-books/SKILL.md
+# --with-codex-skill로 설치한 Codex 스킬:
+ls ~/.agents/skills/legal-books/SKILL.md
 ```
 
-이제 클로드코드에서:
+Claude Code 플러그인으로 설치한 경우 스킬은 플러그인에 포함되므로 위 사용자 경로에 없어도 됩니다. Codex는 설치 후 다시 열고 `$legal-books`로 호출할 수 있습니다.
+
+로컬 Codex 앱·CLI는 셸에서 `localhost:8766`을 호출할 수 있는 환경에서 사용합니다. Codex 클라우드 작업에서는 사용자 컴퓨터의 로컬 서버에 직접 접근할 수 없습니다.
+
+이제 Claude Code 또는 로컬 Codex에서:
 ```
 민법 시효 쟁점에 대해 교과서 바탕으로 정리해줘
 ```
@@ -200,7 +209,7 @@ ls ~/.claude/skills/legal-books/SKILL.md
 
 ```bash
 ~/legal-books/scripts/add_book.sh \
-  --pdf "~/scan/김형배_노동법_제29판.pdf" \
+  --pdf "$HOME/scan/김형배_노동법_제29판.pdf" \
   --author "김형배" \
   --title "노동법" \
   --edition "제29판" \

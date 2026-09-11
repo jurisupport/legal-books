@@ -47,20 +47,33 @@ set_ingest() {  # set_ingest fail|ok
   if [[ "$1" == "fail" ]]; then
     printf '#!/usr/bin/env python3\nraise SystemExit(9)\n' > "$tmpdir/legal-books/scripts/ingest.py"
   else
-    printf '#!/usr/bin/env python3\nprint("ok")\n' > "$tmpdir/legal-books/scripts/ingest.py"
+    cat > "$tmpdir/legal-books/scripts/ingest.py" <<'PY'
+import argparse
+import os
+import sqlite3
+from pathlib import Path
+
+ap = argparse.ArgumentParser()
+for name in ("book-id", "author", "title", "edition"):
+    ap.add_argument(f"--{name}")
+args, _ = ap.parse_known_args()
+with sqlite3.connect(Path(os.environ["HOME"]) / "legal-books/db/books_fts.db") as con:
+    con.execute("CREATE TABLE IF NOT EXISTS books (book_id TEXT PRIMARY KEY, author TEXT, title TEXT, edition TEXT)")
+    con.execute("INSERT OR REPLACE INTO books VALUES (?,?,?,?)", (args.book_id, args.author, args.title, args.edition))
+PY
   fi
 }
 
 run_add_book() {
   set +e
   output=$(
-    HOME="$tmpdir" PATH="$bindir:$PATH" ${CLEAN_FAILED:+LEGAL_BOOKS_CLEAN_FAILED=$CLEAN_FAILED} bash "$SCRIPT" \
+    env HOME="$tmpdir" PATH="$bindir:$PATH" LEGAL_BOOKS_CLEAN_FAILED="${CLEAN_FAILED:-0}" bash "$SCRIPT" \
       --pdf "$tmpdir/scan.pdf" \
       --author "저자" \
       --title "민법총칙" \
       --edition "제1판" \
       --year 2026 \
-      --publisher "출판사" 2>&1
+      --publisher "출판사" "$@" 2>&1
   )
   status=$?
   set -e
@@ -124,6 +137,134 @@ elif compgen -G "$tmpdir/legal-books/books/.001_*.incomplete" >/dev/null; then
   printf '%s\n' "$output" >&2
 else
   printf 'ok - LEGAL_BOOKS_CLEAN_FAILED=1 removes incomplete folder\n'
+fi
+rm -rf "$tmpdir"
+
+# An interrupted book reserves its ID while another book is added.
+setup_env
+set_ingest fail
+run_add_book
+set_ingest ok
+run_add_book --title "다른 책"
+if [[ "$status" -ne 0 ]] || ! compgen -G "$tmpdir/legal-books/books/002_*" >/dev/null; then
+  fail "incomplete book reserves its ID for a later retry"
+else
+  printf 'ok - incomplete book reserves its ID\n'
+fi
+run_add_book
+if [[ "$status" -ne 0 ]] || ! python3 - "$tmpdir/legal-books/db/books_fts.db" <<'PY'
+import sqlite3
+import sys
+with sqlite3.connect(sys.argv[1]) as con:
+    assert con.execute("SELECT book_id, title FROM books ORDER BY book_id").fetchall() == [("001", "민법총칙"), ("002", "다른 책")]
+PY
+then
+  fail "retry preserves the other book's database rows"
+else
+  printf 'ok - retry preserves both books in the database\n'
+fi
+rm -rf "$tmpdir"
+
+# Refuse a collision left by older versions instead of overwriting another book.
+setup_env
+set_ingest fail
+run_add_book
+mkdir "$tmpdir/legal-books/books/001_다른저자_다른책_"
+set_ingest ok
+run_add_book
+if [[ "$status" -eq 0 ]]; then
+  fail "retry rejects an ID already owned by a completed folder"
+else
+  printf 'ok - retry rejects an existing completed-folder ID collision\n'
+fi
+rmdir "$tmpdir/legal-books/books/001_다른저자_다른책_"
+env HOME="$tmpdir" python3 "$tmpdir/legal-books/scripts/ingest.py" \
+  --book-id 001 --author "other" --title "other" --edition ""
+run_add_book
+if [[ "$status" -eq 0 ]]; then
+  fail "retry rejects an ID already owned by another database book"
+else
+  printf 'ok - retry rejects an existing database ID collision\n'
+fi
+env HOME="$tmpdir" python3 "$tmpdir/legal-books/scripts/ingest.py" \
+  --book-id 001 --author "저자" --title "민법총칙" --edition "제1판"
+run_add_book
+if [[ "$status" -ne 0 || "$(wc -l < "$tmpdir/ocr_calls" | tr -d ' ')" != 1 ]]; then
+  fail "retry can finish a book already committed to the database"
+else
+  printf 'ok - retry can finish after the same book was committed\n'
+fi
+rm -rf "$tmpdir"
+
+# Brackets in metadata are literal text, not a find glob pattern.
+setup_env
+set_ingest fail
+run_add_book --title "민법[총칙]"
+mkdir "$tmpdir/legal-books/books/002_previous"
+set_ingest ok
+run_add_book --title "민법[총칙]"
+if [[ "$status" -ne 0 || "$(wc -l < "$tmpdir/ocr_calls" | tr -d ' ')" != 1 ]] || \
+    [[ ! -d "$tmpdir/legal-books/books/001_저자_민법[총칙]_제1판" ]]; then
+  fail "retry matches bracketed book titles literally"
+else
+  printf 'ok - retry matches bracketed titles literally\n'
+fi
+rm -rf "$tmpdir"
+
+# IDs keep working after 999, including retry and reindex folder discovery.
+setup_env
+mkdir "$tmpdir/legal-books/books/999_previous"
+set_ingest fail
+run_add_book
+mkdir "$tmpdir/legal-books/books/1001_previous"
+set_ingest ok
+env HOME="$tmpdir" python3 "$tmpdir/legal-books/scripts/ingest.py" \
+  --book-id 1001 --author "other" --title "other" --edition ""
+run_add_book
+if [[ "$status" -ne 0 || "$(wc -l < "$tmpdir/ocr_calls" | tr -d ' ')" != 1 ]] || \
+    [[ ! -d "$tmpdir/legal-books/books/1000_저자_민법총칙_제1판" ]]; then
+  fail "four-digit book ID can be retried without repeating OCR"
+else
+  printf 'ok - four-digit book ID survives retry\n'
+fi
+mkdir -p "$tmpdir/legal-books/books/1000_저자_민법총칙_제1판"
+touch "$tmpdir/legal-books/books/1000_저자_민법총칙_제1판/1000.pdf"
+printf '{"author":"저자","title":"민법총칙","edition":"제1판"}\n' \
+  > "$tmpdir/legal-books/books/1000_저자_민법총칙_제1판/1000.meta.json"
+if env HOME="$tmpdir" PATH="$bindir:$PATH" bash "$ROOT/toolkit/scripts/reindex.sh" --book-id 1000 >/dev/null 2>&1; then
+  printf 'ok - reindex discovers four-digit book IDs\n'
+else
+  fail "reindex discovers four-digit book IDs"
+fi
+rm -rf "$tmpdir"
+
+# OCR installed only inside the venv must be discoverable before checks.
+setup_env
+mv "$bindir/ocrmypdf" "$tmpdir/legal-books/.venv/bin/ocrmypdf"
+printf 'export PATH="%s:$PATH"\nexport OCR_VENV_ACTIVE=1\n' "$tmpdir/legal-books/.venv/bin" > "$tmpdir/legal-books/.venv/bin/activate"
+cat > "$bindir/tesseract" <<'SH'
+#!/usr/bin/env bash
+if [[ "${OCR_VENV_ACTIVE:-0}" == 1 ]]; then printf 'eng\nkor\n'; else printf 'eng\n'; fi
+SH
+set_ingest ok
+run_add_book
+if [[ "$status" -ne 0 ]]; then
+  fail "venv OCR is discovered before the dependency check"
+  printf '%s\n' "$output" >&2
+else
+  printf 'ok - venv OCR is discovered before dependency checks\n'
+fi
+rm -rf "$tmpdir"
+
+# A quoted tilde path must resolve against the user's home directory.
+setup_env
+set_ingest ok
+run_add_book --pdf '~/scan.pdf'
+if [[ "$status" -ne 0 ]]; then
+  fail "quoted tilde PDF path resolves correctly"
+  printf '%s\n' "$output" >&2
+else
+  printf 'ok - quoted tilde PDF path resolves correctly\n'
 fi
 rm -rf "$tmpdir"
 

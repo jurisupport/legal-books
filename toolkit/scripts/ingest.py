@@ -14,7 +14,6 @@ import argparse
 import bisect
 import json
 import os
-import pathlib
 import sqlite3
 import sys
 import time
@@ -28,7 +27,7 @@ LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
 if LIB_DIR.exists():
     sys.path.insert(0, str(LIB_DIR))
 
-from legal_books_db import DB_PATH, ensure_db
+from legal_books_db import DB_PATH, ensure_db  # noqa: E402 -- installed sibling lib
 
 SECRETS = Path(os.path.expanduser("~/.jurisupport/secrets.env"))
 
@@ -57,8 +56,7 @@ def extract_pages(pdf_path: Path):
         try:
             yield i, page.extract_text() or ""
         except Exception as e:
-            print(f"  page {i}: extract failed ({e})", file=sys.stderr)
-            yield i, ""
+            raise RuntimeError(f"page {i}: text extraction failed") from e
 
 
 def chunk_book(pages, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
@@ -133,7 +131,7 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
                     contents=batch_contents,
                     config=embed_config,
                 )
-                batch_embeddings = [e.values for e in result.embeddings]
+                batch_embeddings = [e.values for e in result.embeddings or [] if e.values is not None]
                 if len(batch_embeddings) != len(batch):
                     raise RuntimeError(
                         f"Gemini returned {len(batch_embeddings)} embeddings "
@@ -227,6 +225,14 @@ def main():
             f"{len(all_chunks)} chunks but {len(embeddings)} embeddings"
         )
 
+    vectors = []
+    for emb in embeddings:
+        vec = np.asarray(emb, dtype=np.float32)
+        norm = np.linalg.norm(vec)
+        if vec.shape != (EMBEDDING_DIM,) or not np.isfinite(norm) or norm <= 0:
+            raise ValueError(f"Invalid embedding: expected {EMBEDDING_DIM} finite, nonzero dimensions")
+        vectors.append(vec / norm)
+
     # Write chunks.jsonl for archival before changing DB. If this fails, DB stays untouched.
     jsonl_path = args.book_dir / f"{args.book_id}.chunks.jsonl"
     with open(jsonl_path, "w", encoding="utf-8") as f:
@@ -254,11 +260,7 @@ def main():
                 args.publisher,
             ),
         )
-        for c, emb in zip(all_chunks, embeddings):
-            vec = np.array(emb, dtype=np.float32)
-            norm = np.linalg.norm(vec)
-            if norm > 0:
-                vec = vec / norm  # truncated-dim embeddings are not guaranteed unit-norm
+        for c, vec in zip(all_chunks, vectors):
             con.execute(
                 "INSERT INTO chunks "
                 "(chunk_id, book_id, page, page_end, chunk_text, embedding) "

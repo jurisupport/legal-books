@@ -67,7 +67,7 @@ book_dirs = []
 for child in sorted(books_dir.iterdir()):
     if not child.is_dir():
         continue
-    match = re.match(r"^(\d{3})_", child.name)
+    match = re.match(r"^(\d+)_", child.name)
     if not match:
         continue
     book_id = match.group(1)

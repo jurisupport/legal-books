@@ -23,7 +23,7 @@ LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
 if LIB_DIR.exists():
     sys.path.insert(0, str(LIB_DIR))
 
-from legal_books_db import DB_PATH, ensure_db
+from legal_books_db import DB_PATH, ensure_db  # noqa: E402 -- installed sibling lib
 
 SECRETS = Path(os.path.expanduser("~/.jurisupport/secrets.env"))
 load_dotenv(SECRETS)
@@ -59,6 +59,8 @@ def embed_query(q: str) -> np.ndarray:
             output_dimensionality=EMBEDDING_DIM,
         ),
     )
+    if not result.embeddings:
+        raise ValueError("Gemini returned no query embedding")
     return np.array(result.embeddings[0].values, dtype=np.float32)
 
 
@@ -88,13 +90,17 @@ def load_embedding_cache(con: sqlite3.Connection) -> dict:
         "SELECT chunk_id, book_id, page, page_end, chunk_text, embedding "
         "FROM chunks WHERE embedding IS NOT NULL"
     ):
-        emb = np.frombuffer(row["embedding"], dtype=np.float32)
-        if emb.size != EMBEDDING_DIM:
+        blob = row["embedding"]
+        if not isinstance(blob, bytes) or len(blob) != EMBEDDING_DIM * 4:
             skipped += 1
             continue
+        emb = np.frombuffer(blob, dtype=np.float32)
         norm = np.linalg.norm(emb)
+        if not np.isfinite(norm) or norm <= 0:
+            skipped += 1
+            continue
         chunk_ids.append(row["chunk_id"])
-        vectors.append(emb / norm if norm > 0 else emb)
+        vectors.append(emb / norm)
         rows[row["chunk_id"]] = dict(row)
     matrix = np.vstack(vectors) if vectors else np.empty((0, EMBEDDING_DIM), dtype=np.float32)
     _EMB_CACHE.update(
@@ -169,25 +175,28 @@ def search(req: SearchReq):
     cos_score_map = {}
     chunk_map = {}
     try:
-        qemb = embed_query(req.query)
-    except Exception as exc:
-        qemb = None
-        warnings.append(f"semantic embedding unavailable; used FTS only: {exc}")
-    if qemb is not None:
+        qemb = np.asarray(embed_query(req.query), dtype=np.float32)
+        qnorm = np.linalg.norm(qemb)
+        if qemb.shape != (EMBEDDING_DIM,) or not np.isfinite(qnorm) or qnorm <= 0:
+            raise ValueError(f"Invalid query embedding: expected {EMBEDDING_DIM} finite, nonzero dimensions")
         cache = load_embedding_cache(con)
         if cache["skipped"]:
             warnings.append(
-                f"embedding dimension mismatch: {cache['skipped']} chunk(s) skipped; reindex needed"
+                f"invalid embedding: {cache['skipped']} chunk(s) skipped; reindex needed"
             )
         if cache["chunk_ids"]:
-            qnorm = np.linalg.norm(qemb)
-            qunit = qemb / qnorm if qnorm > 0 else qemb
+            qunit = qemb / qnorm
             sims = cache["matrix"] @ qunit
             # Take top cosine candidates only; FTS-only hits are fetched below.
             for i in np.argsort(sims)[::-1][:FTS_CANDIDATE_LIMIT]:
                 cid = cache["chunk_ids"][int(i)]
                 cos_score_map[cid] = float(sims[int(i)])
                 chunk_map[cid] = cache["rows"][cid]
+    except Exception as exc:
+        qemb = None
+        cos_score_map.clear()
+        chunk_map.clear()
+        warnings.append(f"semantic embedding unavailable; used FTS only: {exc}")
 
     # 3) Combine
     all_ids = set(fts_score_map.keys()) | set(cos_score_map.keys())
