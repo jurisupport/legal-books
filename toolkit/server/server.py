@@ -165,6 +165,9 @@ def search(req: SearchReq):
     if not req.query.strip():
         raise HTTPException(400, "query is empty")
     con = get_db()
+    if con.execute("SELECT 1 FROM chunks LIMIT 1").fetchone() is None:
+        con.close()
+        return {"query": req.query, "results": []}
     warnings = []
 
     # 1) FTS5 candidates. This path must work even when Gemini is unavailable.

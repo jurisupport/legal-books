@@ -1,7 +1,7 @@
 {
   "name": "legal-books",
   "description": "사무소 보유 법률서적(교과서)을 스캔·OCR·임베딩하여 로컬 하이브리드 검색(SQLite FTS5 + Gemini 임베딩)으로 출처와 함께 인용하는 도구. 책 PDF를 페이지 단위로 인용 가능한 검색 DB로 만들고, Claude Code가 저자·서명·판·페이지를 붙여 답변한다.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": {
     "name": "쥬리서포트 주식회사",
     "email": "admin@jurisupport.com",
