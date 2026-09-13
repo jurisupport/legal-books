@@ -28,9 +28,8 @@ from legal_books_db import DB_PATH, ensure_db  # noqa: E402 -- installed sibling
 SECRETS = Path(os.path.expanduser("~/.jurisupport/secrets.env"))
 load_dotenv(SECRETS)
 
-FTS_WEIGHT = 0.30
-COSINE_WEIGHT = 0.70
 FTS_CANDIDATE_LIMIT = 100
+RRF_K = 60
 TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣_]+")
 EMBEDDING_MODEL = "gemini-embedding-2"
 EMBEDDING_DIM = 768
@@ -67,11 +66,17 @@ def embed_query(q: str) -> np.ndarray:
 def build_fts_query(query: str) -> str:
     """Build a safe high-recall FTS5 query from user text.
 
-    Each token is a prefix query ("소멸시효"*) so that Korean words with a
-    trailing particle in the indexed text (e.g. "소멸시효를") still match.
+    TOKEN_RE drops punctuation, which matters: a raw query containing "?" or
+    "(" is not valid FTS5 syntax and previously surfaced as
+    `fts5: syntax error near "?"`. Ordinary questions ("...대항요건은
+    무엇인가?", "...보호법(GDPR)...") therefore failed outright.
+
+    Each token is a quoted prefix query ("소멸시효"*) so that Korean words with
+    a trailing particle in the indexed text (e.g. "소멸시효를") still match.
     """
     tokens = TOKEN_RE.findall(query)
-    return " OR ".join(f'"{token}"*' for token in tokens[:32])
+    # 따옴표는 FTS5 문자열 리터럴에서 두 번 써서 이스케이프한다.
+    return " OR ".join(f'"{t.replace(chr(34), chr(34) * 2)}"*' for t in tokens[:32])
 
 
 # In-memory embedding cache, reloaded only when the DB file changes.
@@ -109,19 +114,23 @@ def load_embedding_cache(con: sqlite3.Connection) -> dict:
     return _EMB_CACHE
 
 
-def normalize_bm25(rows) -> dict[str, float]:
-    """Normalize FTS5 bm25 scores to [0, 1]. Lower bm25 is better."""
-    if not rows:
-        return {}
-    scores = [float(r["score"]) for r in rows]
-    best = min(scores)
-    worst = max(scores)
-    if best == worst:
-        return {r["chunk_id"]: 1.0 for r in rows}
-    return {
-        r["chunk_id"]: (worst - float(r["score"])) / (worst - best)
-        for r in rows
-    }
+def rrf_fuse(rankings: list[list[str]], k: int = RRF_K) -> dict[str, float]:
+    """Reciprocal Rank Fusion.
+
+    Replaces the previous `FTS_WEIGHT * bm25 + COSINE_WEIGHT * cosine` blend.
+    That blend min-max normalized bm25 over the candidate set, so the best
+    keyword hit always scored exactly 1.0 no matter how poorly it matched,
+    while cosine similarity occupies a narrow band (~0.6-0.9 in practice).
+    The scales did not line up, and keyword-dense chunks (tables of contents,
+    indexes, case-number lists) displaced substantive prose.
+
+    RRF only uses rank position, so the two scales never have to agree.
+    """
+    scores: dict[str, float] = {}
+    for ranking in rankings:
+        for rank, chunk_id in enumerate(ranking, start=1):
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank)
+    return scores
 
 
 def fetch_fts_candidates(con: sqlite3.Connection, query: str):
@@ -172,10 +181,10 @@ def search(req: SearchReq):
 
     # 1) FTS5 candidates. This path must work even when Gemini is unavailable.
     fts_rows = fetch_fts_candidates(con, req.query)
-    fts_score_map = normalize_bm25(fts_rows)
+    fts_ranking = [r["chunk_id"] for r in fts_rows]     # already ORDER BY bm25
 
     # 2) Cosine similarity via the in-memory embedding cache.
-    cos_score_map = {}
+    cos_ranking: list[str] = []
     chunk_map = {}
     try:
         qemb = np.asarray(embed_query(req.query), dtype=np.float32)
@@ -191,9 +200,11 @@ def search(req: SearchReq):
             qunit = qemb / qnorm
             sims = cache["matrix"] @ qunit
             # Take top cosine candidates only; FTS-only hits are fetched below.
-            for i in np.argsort(sims)[::-1][:FTS_CANDIDATE_LIMIT]:
+            n = min(FTS_CANDIDATE_LIMIT, sims.shape[0])
+            top = np.argpartition(sims, -n)[-n:]        # full sort is wasted work
+            for i in top[np.argsort(-sims[top])]:
                 cid = cache["chunk_ids"][int(i)]
-                cos_score_map[cid] = float(sims[int(i)])
+                cos_ranking.append(cid)
                 chunk_map[cid] = cache["rows"][cid]
     except Exception as exc:
         qemb = None
@@ -202,7 +213,7 @@ def search(req: SearchReq):
         warnings.append(f"semantic embedding unavailable; used FTS only: {exc}")
 
     # 3) Combine
-    all_ids = set(fts_score_map.keys()) | set(cos_score_map.keys())
+    all_ids = set(fts_ranking) | set(cos_ranking)
     combined = []
     # Pull rows we do not have yet (usually FTS-only hits).
     missing = all_ids - set(chunk_map.keys())
@@ -214,26 +225,24 @@ def search(req: SearchReq):
         ):
             chunk_map[r["chunk_id"]] = r
 
-    for cid in all_ids:
-        fs = fts_score_map.get(cid, 0.0)
-        cs = cos_score_map.get(cid, 0.0)
-        if qemb is None:
-            score = fs
-        elif cid in fts_score_map and cid in cos_score_map:
-            score = FTS_WEIGHT * fs + COSINE_WEIGHT * cs
-        elif cid in fts_score_map:
-            score = FTS_WEIGHT * fs
-        else:
-            score = COSINE_WEIGHT * cs
-        combined.append((cid, score))
-    combined.sort(key=lambda x: x[1], reverse=True)
+    fused = rrf_fuse([r for r in (fts_ranking, cos_ranking) if r])
+    combined = sorted(fused.items(), key=lambda x: -x[1])
 
     # Lookup book metadata
     books = {b["book_id"]: dict(b) for b in con.execute("SELECT * FROM books")}
 
     results = []
-    for cid, score in combined[: req.top_k]:
-        row = chunk_map[cid]
+    stale = 0
+    for cid, score in combined:
+        if len(results) >= req.top_k:
+            break
+        # A chunk_id can appear in the FTS index but no longer in `chunks`
+        # (interrupted reindex, manual DELETE). Indexing chunk_map directly
+        # raised KeyError and turned the whole search into a 500.
+        row = chunk_map.get(cid)
+        if row is None:
+            stale += 1
+            continue
         book = books.get(row["book_id"], {})
         results.append({
             "chunk_id": cid,
@@ -248,6 +257,10 @@ def search(req: SearchReq):
             "chunk_text": row["chunk_text"],
         })
     con.close()
+    if stale:
+        warnings.append(
+            f"{stale} chunk(s) present in the FTS index but missing from `chunks`; "
+            "run reindex.sh to rebuild")
     response = {"query": req.query, "results": results}
     if warnings:
         response["warnings"] = warnings[:5]

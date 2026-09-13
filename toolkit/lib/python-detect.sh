@@ -58,6 +58,13 @@ select_python() {
       _try_python_candidate "$min_version" python3 ||
       _try_python_candidate "$min_version" python
   else
+    # macOS는 `python3`가 시스템 3.9인 경우가 흔하다. 버전이 붙은 이름을
+    # 먼저(최신순) 훑지 않으면, Homebrew로 3.12/3.14를 깔아둔 맥에서도
+    # "Python 3.10+ 필요"로 설치가 중단된다.
+    local minor
+    for minor in 14 13 12 11 10; do
+      _try_python_candidate "$min_version" "python3.${minor}" && return 0
+    done
     _try_python_candidate "$min_version" python3 ||
       _try_python_candidate "$min_version" python
   fi
